@@ -1,0 +1,686 @@
+/**
+ * @name Teleport
+ * @description Ctrl toggles F/G/H/T directional teleport mode. This can be used on any gamode thats 2d. Server side insted of client side
+ * @version 1.3.2
+ * @author Fireworks760
+ * @gamemode 2d
+ */
+
+api.net.onLoad(() => {
+  // -------------------------
+  // Helpers
+  // -------------------------
+  function getScene() { try { return api.stores && api.stores.phaser && api.stores.phaser.scene; } catch (_) { return null; } }
+  function getMainCharacter() { try { return api.stores && api.stores.phaser && api.stores.phaser.mainCharacter; } catch (_) { return null; } }
+  function getRigidBody() {
+    try {
+      const main = getMainCharacter();
+      if (!main) return null;
+      const phys = main.physics && typeof main.physics.getBody === "function" && main.physics.getBody();
+      return phys && phys.rigidBody ? phys.rigidBody : null;
+    } catch (_) { return null; }
+  }
+  function getBodyBounds() {
+    try {
+      const main = getMainCharacter();
+      if (!main) return null;
+      const body = main.body || (main.getBody && main.getBody()) || main;
+      const x = (body && (typeof body.x === "number" ? body.x : (body.position && body.position.x))) || 0;
+      const y = (body && (typeof body.y === "number" ? body.y : (body.position && body.position.y))) || 0;
+      const w = (body && (typeof body.width === "number" ? body.width : (body.size && body.size.x))) || 0;
+      const h = (body && (typeof body.height === "number" ? body.height : (body.size && body.size.y))) || 0;
+      if ((!w || !h) && typeof body.getBounds === "function") {
+        try {
+          const b = body.getBounds();
+          return { x: b.x || x, y: b.y || y, width: b.width || w, height: b.height || h };
+        } catch (_) {}
+      }
+      return { x, y, width: w, height: h };
+    } catch (_) { return null; }
+  }
+  function getMainBodyPos() {
+    try {
+      const main = getMainCharacter();
+      if (!main) return null;
+      const body = main.body || (main.getBody && main.getBody()) || main;
+      const x = (body && (body.x || (body.position && body.position.x))) || 0;
+      const y = (body && (body.y || (body.position && body.position.y))) || 0;
+      return { x, y };
+    } catch (_) { return null; }
+  }
+
+  // -------------------------
+  // Compute points outside hitbox
+  // -------------------------
+  function computePointOutsideHitboxTowards(mouseX, mouseY, paddingPx = 5) {
+    const bounds = getBodyBounds();
+    if (!bounds) return null;
+    const cx = bounds.x + (bounds.width || 0) / 2;
+    const cy = bounds.y + (bounds.height || 0) / 2;
+    let dx = mouseX - cx;
+    let dy = mouseY - cy;
+    const dist = Math.hypot(dx, dy);
+    if (dist <= 0.0001) {
+      return { x: cx - (bounds.width || 0) / 2 - paddingPx, y: cy };
+    }
+    dx /= dist;
+    dy /= dist;
+    const hx = (bounds.width || 0) / 2;
+    const hy = (bounds.height || 0) / 2;
+    const tx = Math.abs(dx) > 1e-6 ? hx / Math.abs(dx) : Number.POSITIVE_INFINITY;
+    const ty = Math.abs(dy) > 1e-6 ? hy / Math.abs(dy) : Number.POSITIVE_INFINITY;
+    const tEdge = Math.min(tx, ty);
+    const targetX = cx + (tEdge + paddingPx) * dx;
+    const targetY = cy + (tEdge + paddingPx) * dy;
+    return { x: targetX, y: targetY };
+  }
+
+  function computePointOutsideHitboxInDirection(dir, paddingPx = 5) {
+    const bounds = getBodyBounds();
+    if (!bounds) return null;
+    const cx = bounds.x + (bounds.width || 0) / 2;
+    const cy = bounds.y + (bounds.height || 0) / 2;
+    const hx = (bounds.width || 0) / 2;
+    const hy = (bounds.height || 0) / 2;
+    const dx = dir.dx || 0;
+    const dy = dir.dy || 0;
+    if (dx === 0 && dy === 0) return null;
+    if (dx !== 0) {
+      const targetX = cx + (hx + paddingPx) * dx;
+      return { x: targetX, y: cy };
+    }
+    if (dy !== 0) {
+      const targetY = cy + (hy + paddingPx) * dy;
+      return { x: cx, y: targetY };
+    }
+    return null;
+  }
+
+  // -------------------------
+  // Teleport helper (centralized)
+  // -------------------------
+  function applyTeleportToPoint(point) {
+    if (!point) return false;
+    const rb = getRigidBody();
+    if (!rb) return false;
+    try {
+      rb.setTranslation({ x: point.x / 100, y: point.y / 100 }, true);
+      return true;
+    } catch (e) {
+      try { if (typeof rb.setTranslation === "function") rb.setTranslation(point.x / 100, point.y / 100, true); } catch (_) {}
+      return false;
+    }
+  }
+
+  // -------------------------
+  // Ctrl+Click handler: teleport to point 5px outside hitbox toward click
+  // If a Ctrl-direction toggle is active, use that direction instead of mouse.
+  // -------------------------
+  try {
+    const scene = getScene();
+    const onClick = (e) => {
+      try {
+        if (!e || !e.ctrlKey) return;
+        if (!scene) return;
+        const pos = scene.inputManager && typeof scene.inputManager.getMouseWorldXY === "function" && scene.inputManager.getMouseWorldXY();
+        if (!pos) return;
+
+        const lastKey = (window.__TeleportDirection && window.__TeleportDirection.lastPressedKey) || null;
+        let target = null;
+        if (lastKey) {
+          // mapping: f/g/h/t -> left/down/right/up
+          const map = { f: { dx: -1, dy: 0 }, g: { dx: 0, dy: 1 }, h: { dx: 1, dy: 0 }, t: { dx: 0, dy: -1 } };
+          const dir = map[lastKey];
+          if (dir) target = computePointOutsideHitboxInDirection(dir, 5);
+        }
+        if (!target) target = computePointOutsideHitboxTowards(pos.x, pos.y, 5);
+        if (!target) return;
+        applyTeleportToPoint(target);
+      } catch (_) {}
+    };
+    try { window.addEventListener("click", onClick); } catch (_) {}
+    try { api.onStop(() => window.removeEventListener("click", onClick)); } catch (_) {}
+  } catch (_) {}
+
+  // -------------------------
+  // Teleport to other player command
+  // -------------------------
+  try {
+    const otherPlayers = () => {
+      try {
+        const chars = api.stores && api.stores.characters && api.stores.characters.characters;
+        if (!chars) return [];
+        return [...chars.values()].filter((char) => char && char.type === "player" && char.id !== (api.stores && api.stores.network && api.stores.network.authId));
+      } catch (_) { return []; }
+    };
+
+    api.commands.addCommand({
+      text: "Teleport: Teleport to Player",
+      hidden: () => otherPlayers().length === 0
+    }, async (context) => {
+      try {
+        const players = otherPlayers();
+        if (!players || players.length === 0) return;
+        const player = await context.select({
+          title: "Player",
+          options: players.map((p) => ({ label: p.name, value: p.id }))
+        });
+        if (!player) return;
+        const charEntry = api.stores && api.stores.phaser && api.stores.phaser.scene && api.stores.phaser.scene.characterManager && api.stores.phaser.scene.characterManager.characters && api.stores.phaser.scene.characterManager.characters.get(player);
+        const pos = charEntry && charEntry.body;
+        if (!pos) return;
+        applyTeleportToPoint({ x: pos.x, y: pos.y });
+      } catch (_) {}
+    });
+  } catch (_) {}
+
+  // -------------------------
+  // rAF-driven repeat + stronger anti-snap + visual smoothing
+  // -------------------------
+  (function () {
+    // rAF config
+    const TARGET_HZ = 120; // set 60 or 120 depending on responsiveness/CPU
+    const MIN_FRAME_MS = 1000 / TARGET_HZ;
+
+    let rafId = null;
+    let lastFrameTime = 0;
+    let activeRepeatKey = null;
+
+    // direction state
+    let directionModeEnabled = false;
+    const keysDown = { f: false, g: false, h: false, t: false };
+    let lastPressedKey = null;
+
+    function notify(msg) {
+      try {
+        if (api && api.UI && typeof api.UI.notification.open === "function") {
+          api.UI.notification.open({ message: msg, duration: 700 });
+          return;
+        }
+        if (api && api.notifications && typeof api.notifications.create === "function") {
+          api.notifications.create({ title: "", message: msg, type: "info", duration: 700 });
+          return;
+        }
+      } catch (_) {}
+    }
+
+    function getDirectionFromKey(key) {
+      switch (key) {
+        case "f": return { dx: -1, dy: 0 };
+        case "h": return { dx: 1, dy: 0 };
+        case "t": return { dx: 0, dy: -1 };
+        case "g": return { dx: 0, dy: 1 };
+        default: return { dx: 0, dy: 0 };
+      }
+    }
+
+    function doDirectionalTeleport(key) {
+      try {
+        const dir = getDirectionFromKey(key);
+        if (!dir || (dir.dx === 0 && dir.dy === 0)) return;
+        const point = computePointOutsideHitboxInDirection(dir, 5); // padding unchanged
+        if (!point) return;
+        applyTeleportToPoint(point);
+      } catch (_) {}
+    }
+
+    // rAF loop
+    function repeatLoopFrame(now) {
+      try {
+        if (!lastFrameTime) lastFrameTime = now;
+        const dt = now - lastFrameTime;
+        if (dt >= MIN_FRAME_MS) {
+          lastFrameTime = now;
+          if (activeRepeatKey) {
+            try { doDirectionalTeleport(activeRepeatKey); } catch (_) {}
+          }
+        }
+      } catch (_) {}
+      if (activeRepeatKey) {
+        rafId = window.requestAnimationFrame(repeatLoopFrame);
+      } else {
+        rafId = null;
+        lastFrameTime = 0;
+      }
+    }
+
+    function startRepeatForKey(key) {
+      try {
+        activeRepeatKey = key;
+        try { doDirectionalTeleport(key); } catch (_) {}
+        if (!rafId) {
+          lastFrameTime = 0;
+          rafId = window.requestAnimationFrame(repeatLoopFrame);
+        }
+      } catch (_) {}
+    }
+
+    function stopRepeat() {
+      try {
+        activeRepeatKey = null;
+        if (rafId) {
+          try { window.cancelAnimationFrame(rafId); } catch (_) {}
+          rafId = null;
+          lastFrameTime = 0;
+        }
+      } catch (_) {}
+    }
+
+    function updateSharedDirection() {
+      try {
+        window.__TeleportDirection = window.__TeleportDirection || {};
+        window.__TeleportDirection.lastPressedKey = lastPressedKey;
+      } catch (_) {}
+    }
+
+    // -------------------------
+    // Visual smoothing (safe)
+    // -------------------------
+    const visualSmoothing = (function () {
+      const SMOOTH_DURATION_MS = 150;
+      const SAMPLE_MS = 16;
+      let smoothing = { active: false, startTime: 0, duration: SMOOTH_DURATION_MS, from: null, to: null };
+      let smoothInterval = null;
+
+      function getSprite() {
+        try {
+          const main = api.stores && api.stores.phaser && api.stores.phaser.mainCharacter;
+          if (!main) return null;
+          return main.sprite || main.display || main;
+        } catch (_) { return null; }
+      }
+      function startTo(serverPos) {
+        try {
+          const sprite = getSprite();
+          if (!sprite || !serverPos) return;
+          smoothing.active = true;
+          smoothing.startTime = Date.now();
+          smoothing.duration = SMOOTH_DURATION_MS;
+          smoothing.from = { x: sprite.x || 0, y: sprite.y || 0 };
+          smoothing.to = serverPos;
+        } catch (_) {}
+      }
+      function lerp(a, b, t) { return a + (b - a) * t; }
+      function loop() {
+        try {
+          if (!smoothing.active) return;
+          const sprite = getSprite();
+          if (!sprite) return;
+          const now = Date.now();
+          const t = Math.min(1, smoothing.duration <= 0 ? 1 : (now - smoothing.startTime) / smoothing.duration);
+          const nx = lerp(smoothing.from.x, smoothing.to.x, t);
+          const ny = lerp(smoothing.from.y, smoothing.to.y, t);
+          try { sprite.x = nx; sprite.y = ny; } catch (_) {}
+          if (t >= 1) smoothing.active = false;
+        } catch (_) {}
+      }
+      function startLoop() { if (!smoothInterval) smoothInterval = setInterval(loop, SAMPLE_MS); }
+      function stopLoop() { try { if (smoothInterval) { clearInterval(smoothInterval); smoothInterval = null; } } catch (_) {} }
+      startLoop();
+
+      // detector for authoritative jumps
+      let lastAuth = null;
+      const CORRECTION_THRESHOLD = 10;
+      const detectInterval = setInterval(() => {
+        try {
+          const main = api.stores && api.stores.phaser && api.stores.phaser.mainCharacter;
+          if (!main) return;
+          const body = main.body || (main.getBody && main.getBody()) || main;
+          if (!body) return;
+          const ax = (typeof body.x === "number") ? body.x : (body.position && body.position.x) || 0;
+          const ay = (typeof body.y === "number") ? body.y : (body.position && body.position.y) || 0;
+          const auth = { x: ax, y: ay };
+          if (lastAuth) {
+            const dx = auth.x - lastAuth.x;
+            const dy = auth.y - lastAuth.y;
+            if (Math.hypot(dx, dy) >= CORRECTION_THRESHOLD) {
+              startTo(auth);
+            }
+          }
+          lastAuth = auth;
+        } catch (_) {}
+      }, 80);
+
+      try { api.onStop(() => { stopLoop(); try { clearInterval(detectInterval); } catch (_) {} }); } catch (_) {}
+
+      return { startTo };
+    })();
+
+    // -------------------------
+    // Stronger anti-snap (best-effort client-side reapply)
+    // -------------------------
+    const antiSnap = (function () {
+      // Tunables (stronger/aggressive)
+      const POLL_MS = 30;                 // sample body more often
+      const GROUNDED_VY_THRESHOLD = 0.5;
+      const FALL_START_VY_THRESHOLD = 1.0;
+      const FALL_DISTANCE_THRESHOLD = 4;  // smaller threshold to detect small falls
+      const SNAP_DETECT_DISTANCE = 10;    // distance to detect server snap-back
+      const RELEASE_GRACE_MS = 2000;      // extended grace after release
+      const REAPPLY_RAF_HZ = 350;         // aggressive reapply rate while active
+      const REAPPLY_RAF_MIN_MS = 1000 / REAPPLY_RAF_HZ;
+      const MULTI_RETRY_COUNT = 6;        // immediate retries on snap detection
+      const MULTI_RETRY_SPACING_MS = 12;  // spacing between immediate retries
+      const RECENT_POS_MAX_AGE_MS = 4000; // how recent the lastClientDesiredPos must be
+
+      // internal state
+      let pollInterval = null;
+      let lastGroundedPos = null;
+      let fallingThrough = false;
+      let lastClientDesiredPos = null;
+      let lastClientDesiredTime = 0;
+
+      // rAF reapply loop state
+      let reapplyRafId = null;
+      let reapplyLastTime = 0;
+      let reapplyActive = false;
+
+      // debug helper (toggle to true to see logs)
+      const DEBUG = false;
+      function dlog(...a) { if (DEBUG) try { console.log("[antiSnap]", ...a); } catch (_) {} }
+
+      // low-level attempt to set translation with multiple fallbacks
+      function trySetTranslation(rb, pos) {
+        if (!rb || !pos) return;
+        try {
+          rb.setTranslation({ x: pos.x / 100, y: pos.y / 100 }, true);
+          return true;
+        } catch (_) {
+          try { if (typeof rb.setTranslation === "function") rb.setTranslation(pos.x / 100, pos.y / 100, true); } catch (_) {}
+        }
+        return false;
+      }
+
+      // aggressive immediate retries (small spaced attempts)
+      function immediateMultiRetry(pos) {
+        try {
+          const rb = getRigidBody();
+          if (!rb || !pos) return;
+          for (let i = 0; i < MULTI_RETRY_COUNT; i++) {
+            setTimeout(() => {
+              trySetTranslation(rb, pos);
+            }, i * MULTI_RETRY_SPACING_MS);
+          }
+        } catch (_) {}
+      }
+
+      // rAF-driven reapply while active (very responsive)
+      function reapplyRafFrame(now) {
+        try {
+          if (!reapplyLastTime) reapplyLastTime = now;
+          const dt = now - reapplyLastTime;
+          if (dt >= REAPPLY_RAF_MIN_MS) {
+            reapplyLastTime = now;
+            if (lastClientDesiredPos && (Date.now() - lastClientDesiredTime) < RECENT_POS_MAX_AGE_MS) {
+              const rb = getRigidBody();
+              if (rb) {
+                trySetTranslation(rb, lastClientDesiredPos);
+              }
+            }
+          }
+        } catch (_) {}
+        if (reapplyActive) {
+          reapplyRafId = window.requestAnimationFrame(reapplyRafFrame);
+        } else {
+          reapplyRafId = null;
+          reapplyLastTime = 0;
+        }
+      }
+
+      function startReapplyLoop() {
+        if (reapplyActive) return;
+        reapplyActive = true;
+        reapplyLastTime = 0;
+        reapplyRafId = window.requestAnimationFrame(reapplyRafFrame);
+      }
+
+      function stopReapplyLoop() {
+        reapplyActive = false;
+        if (reapplyRafId) {
+          try { window.cancelAnimationFrame(reapplyRafId); } catch (_) {}
+          reapplyRafId = null;
+          reapplyLastTime = 0;
+        }
+      }
+
+      // sample body periodically to detect falling-through and snap-backs
+      function sampleBody() {
+        try {
+          const main = getMainCharacter();
+          if (!main) return;
+          const body = main.body || (main.getBody && main.getBody()) || main;
+          if (!body) return;
+          const pos = getMainBodyPos();
+          if (!pos) return;
+
+          // velocity detection
+          let vy = 0;
+          try {
+            if (body.velocity && typeof body.velocity.y === "number") vy = body.velocity.y;
+            else if (body.body && body.body.velocity && typeof body.body.velocity.y === "number") vy = body.body.velocity.y;
+            else if (body.getVelocity && typeof body.getVelocity === "function") {
+              const v = body.getVelocity();
+              if (v && typeof v.y === "number") vy = v.y;
+            }
+          } catch (_) { vy = 0; }
+
+          // grounded detection (best-effort)
+          let grounded = false;
+          try {
+            if (typeof body.onFloor === "boolean") grounded = !!body.onFloor;
+            else if (body.touching && typeof body.touching.down === "boolean") grounded = !!body.touching.down;
+            else if (body.blocked && typeof body.blocked.down === "boolean") grounded = !!body.blocked.down;
+            else grounded = Math.abs(vy) < GROUNDED_VY_THRESHOLD;
+          } catch (_) { grounded = Math.abs(vy) < GROUNDED_VY_THRESHOLD; }
+
+          // update last client desired pos
+          lastClientDesiredPos = { x: pos.x, y: pos.y };
+          lastClientDesiredTime = Date.now();
+
+          // transitions: detect start of falling-through
+          if (grounded) {
+            lastGroundedPos = { x: pos.x, y: pos.y };
+            if (fallingThrough) {
+              fallingThrough = false;
+              dlog("landed, clearing fallingThrough", lastGroundedPos);
+              stopReapplyLoop();
+            }
+          } else {
+            if (lastGroundedPos && !fallingThrough) {
+              const dy = pos.y - lastGroundedPos.y;
+              if (vy > FALL_START_VY_THRESHOLD && dy > FALL_DISTANCE_THRESHOLD) {
+                fallingThrough = true;
+                dlog("started fallingThrough", { vy, dy, pos, lastGroundedPos });
+                // start aggressive reapply while falling
+                startReapplyLoop();
+              }
+            }
+          }
+
+          // detect server snap-back: authoritative pos near lastGroundedPos while we think we're falling
+          if (fallingThrough && lastGroundedPos) {
+            const distToGrounded = Math.hypot(pos.x - lastGroundedPos.x, pos.y - lastGroundedPos.y);
+            if (distToGrounded <= SNAP_DETECT_DISTANCE) {
+              dlog("snap-back detected; reapplying lastClientDesiredPos", { pos, lastClientDesiredPos, lastGroundedPos });
+              // immediate multi-retry and ensure reapply loop runs for grace period
+              immediateMultiRetry(lastClientDesiredPos);
+              startReapplyLoop();
+              // schedule stop after extended grace
+              try {
+                if (releaseReapplyTimer) { clearTimeout(releaseReapplyTimer); releaseReapplyTimer = null; }
+              } catch (_) {}
+              releaseReapplyTimer = setTimeout(() => {
+                try {
+                  stopReapplyLoop();
+                  releaseReapplyTimer = null;
+                  dlog("release grace ended");
+                } catch (_) {}
+              }, RELEASE_GRACE_MS);
+            }
+          }
+        } catch (_) {}
+      }
+
+      // When the user releases the direction key, keep reapplying for a grace window
+      let releaseReapplyTimer = null;
+      function continueReapplyAfterReleaseIfNeeded() {
+        try {
+          if (!fallingThrough) return;
+          if (!lastGroundedPos || !lastClientDesiredPos) return;
+          const dist = Math.hypot(lastClientDesiredPos.x - lastGroundedPos.x, lastClientDesiredPos.y - lastGroundedPos.y);
+          if (dist <= FALL_DISTANCE_THRESHOLD) return;
+
+          // start reapply loop and schedule stop after extended grace
+          startReapplyLoop();
+          try {
+            if (releaseReapplyTimer) { clearTimeout(releaseReapplyTimer); releaseReapplyTimer = null; }
+          } catch (_) {}
+          releaseReapplyTimer = setTimeout(() => {
+            try {
+              stopReapplyLoop();
+              releaseReapplyTimer = null;
+              dlog("continueReapplyAfterReleaseIfNeeded: grace ended");
+            } catch (_) {}
+          }, RELEASE_GRACE_MS);
+        } catch (_) {}
+      }
+
+      // start/stop sampling
+      function start() {
+        stop();
+        pollInterval = setInterval(sampleBody, POLL_MS);
+      }
+      function stop() {
+        try {
+          if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+          if (releaseReapplyTimer) { clearTimeout(releaseReapplyTimer); releaseReapplyTimer = null; }
+          stopReapplyLoop();
+        } catch (_) {}
+      }
+
+      // start immediately
+      start();
+      try { api.onStop(stop); } catch (_) {}
+
+      // expose control for debugging
+      return {
+        continueReapplyAfterReleaseIfNeeded,
+        isFallingThrough: () => fallingThrough,
+        getLastGroundedPos: () => lastGroundedPos,
+        getLastClientDesiredPos: () => lastClientDesiredPos,
+        stop
+      };
+    })();
+
+    // -------------------------
+    // Key handling
+    // -------------------------
+    function onCtrlToggle() {
+      directionModeEnabled = !directionModeEnabled;
+      try { updateSharedDirection(); } catch (_) {}
+      notify(directionModeEnabled ? "Direction mode enabled (F/G/H/T active)" : "Direction mode disabled");
+      if (!directionModeEnabled) {
+        stopRepeat();
+        keysDown.f = keysDown.g = keysDown.h = keysDown.t = false;
+        lastPressedKey = null;
+        updateSharedDirection();
+      }
+    }
+
+    function onKeyDown(e) {
+      try {
+        if (!e) return;
+        const key = (e.key || "").toLowerCase();
+
+        if (key === "control" || e.code === "ControlLeft" || e.code === "ControlRight") {
+          if (!e.repeat) onCtrlToggle();
+          return;
+        }
+
+        if (!directionModeEnabled) return;
+
+        if ((key === "f" || e.code === "KeyF") && !keysDown.f) {
+          keysDown.f = true; lastPressedKey = "f"; updateSharedDirection(); startRepeatForKey("f"); try { e.preventDefault(); } catch (_) {}
+        } else if ((key === "g" || e.code === "KeyG") && !keysDown.g) {
+          keysDown.g = true; lastPressedKey = "g"; updateSharedDirection(); startRepeatForKey("g"); try { e.preventDefault(); } catch (_) {}
+        } else if ((key === "h" || e.code === "KeyH") && !keysDown.h) {
+          keysDown.h = true; lastPressedKey = "h"; updateSharedDirection(); startRepeatForKey("h"); try { e.preventDefault(); } catch (_) {}
+        } else if ((key === "t" || e.code === "KeyT") && !keysDown.t) {
+          keysDown.t = true; lastPressedKey = "t"; updateSharedDirection(); startRepeatForKey("t"); try { e.preventDefault(); } catch (_) {}
+        }
+      } catch (_) {}
+    }
+
+    function findAnyPressedKey() {
+      if (keysDown.h) return "h";
+      if (keysDown.f) return "f";
+      if (keysDown.t) return "t";
+      if (keysDown.g) return "g";
+      return null;
+    }
+
+    function onKeyUp(e) {
+      try {
+        if (!e) return;
+        const key = (e.key || "").toLowerCase();
+
+        if (key === "control" || e.code === "ControlLeft" || e.code === "ControlRight") return;
+
+        if (key === "f" || e.code === "KeyF") {
+          keysDown.f = false; if (lastPressedKey === "f") lastPressedKey = findAnyPressedKey();
+        } else if (key === "g" || e.code === "KeyG") {
+          keysDown.g = false; if (lastPressedKey === "g") lastPressedKey = findAnyPressedKey();
+          try { antiSnap.continueReapplyAfterReleaseIfNeeded(); } catch (_) {}
+        } else if (key === "h" || e.code === "KeyH") {
+          keysDown.h = false; if (lastPressedKey === "h") lastPressedKey = findAnyPressedKey();
+        } else if (key === "t" || e.code === "KeyT") {
+          keysDown.t = false; if (lastPressedKey === "t") lastPressedKey = findAnyPressedKey();
+        }
+
+        if (!keysDown.f && !keysDown.g && !keysDown.h && !keysDown.t) {
+          stopRepeat(); lastPressedKey = null;
+        } else if (lastPressedKey) {
+          startRepeatForKey(lastPressedKey);
+        }
+
+        updateSharedDirection();
+      } catch (_) {}
+    }
+
+    try {
+      window.addEventListener("keydown", onKeyDown, { capture: true, passive: false });
+      window.addEventListener("keyup", onKeyUp, { capture: true, passive: true });
+    } catch (e) {
+      try { window.addEventListener("keydown", onKeyDown); window.addEventListener("keyup", onKeyUp); } catch (_) {}
+    }
+
+    // cleanup
+    try {
+      api.onStop(() => {
+        try {
+          stopRepeat();
+          if (rafId) { try { window.cancelAnimationFrame(rafId); } catch (_) {} rafId = null; }
+          window.removeEventListener("keydown", onKeyDown, { capture: true });
+          window.removeEventListener("keyup", onKeyUp, { capture: true });
+        } catch (_) {}
+      });
+    } catch (_) {}
+
+    // expose debug helpers
+    try {
+      window.TeleportFastAlt = window.TeleportFastAlt || {};
+      window.TeleportFastAlt.doDirectionalTeleport = doDirectionalTeleport;
+      window.TeleportFastAlt.stopRepeat = stopRepeat;
+      window.TeleportFastAlt.isDirectionModeEnabled = () => directionModeEnabled;
+      window.TeleportFastAlt.antiSnap = {
+        continueReapplyAfterReleaseIfNeeded: antiSnap.continueReapplyAfterReleaseIfNeeded,
+        isFallingThrough: antiSnap.isFallingThrough || (() => false),
+        getLastGroundedPos: antiSnap.getLastGroundedPos || (() => null),
+        getLastClientDesiredPos: antiSnap.getLastClientDesiredPos || (() => null)
+      };
+      window.__TeleportDirection = window.__TeleportDirection || {};
+      window.__TeleportDirection.lastPressedKey = lastPressedKey;
+    } catch (_) {}
+  })();
+
+});
