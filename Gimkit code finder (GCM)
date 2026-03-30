@@ -1,0 +1,523 @@
+/**
+ * @name GimkitCodeFinder
+ * @author Fireworks760
+ * @version 1.1.3
+ * @description Allows you to find gimkit codes on the join menu press P to actavate.
+ */
+(function () {
+  'use strict';
+
+  // Wait for DOM to be ready before touching head/body
+  function whenDomReady() {
+    return new Promise(resolve => {
+      if (document.readyState === 'complete' || document.readyState === 'interactive') {
+        resolve();
+      } else {
+        document.addEventListener('DOMContentLoaded', () => resolve(), { once: true });
+      }
+    });
+  }
+
+  // --- State ---
+  let running = false;
+  let controllers = [];           // track all AbortControllers used by finder attempts
+  let attemptCount = 0;
+  let notifRoot = null;
+  let foundCode = null;           // when a code is found, store it here
+  let playersObserver = null;
+
+  // --- Page check: exact join page (only UI/loader on this URL)
+  function isJoinPage() {
+    try {
+      const href = (window.location.href || '').toLowerCase();
+      // Accepts exact https://www.gimkit.com/join and with trailing slash or query
+      return href.startsWith('https://www.gimkit.com/join');
+    } catch {
+      return false;
+    }
+  }
+
+  // Safe append to head/body
+  function safeAppendToHead(el) {
+    const head = document.head || document.getElementsByTagName('head')[0];
+    if (head) head.appendChild(el);
+    else document.documentElement.appendChild(el);
+  }
+  function safeAppendToBody(el) {
+    const body = document.body || document.getElementsByTagName('body')[0];
+    if (body) body.appendChild(el);
+    else document.documentElement.appendChild(el);
+  }
+
+  // Remove element by id if exists
+  function removeIfExists(id) {
+    const e = document.getElementById(id);
+    if (e) e.remove();
+  }
+
+  // Abort and clear all controllers (stops every in-flight finder fetch)
+  function abortAllControllers() {
+    try {
+      controllers.forEach(c => {
+        try { c.abort(); } catch {}
+      });
+    } finally {
+      controllers.length = 0;
+    }
+  }
+
+  // --- Player detection heuristics ---
+  function detectPlayersNow() {
+    try {
+      const selectors = [
+        '.player', '.player-row', '.playerRow', '.players-list', '.playersList',
+        '[data-testid="player"]', '[data-testid="player-row"]', '.player-item', '.playerItem'
+      ];
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el) {
+          const text = (el.innerText || '').trim();
+          if (text.length > 0) return true;
+          if (el.children && el.children.length > 0) return true;
+        }
+      }
+      const bodyText = (document.body && document.body.innerText) ? document.body.innerText.toLowerCase() : '';
+      if (/\b\d+\s+players?\b/.test(bodyText) || /\bplayers?:\s*\d+\b/.test(bodyText)) return true;
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  function startPlayersObserver() {
+    stopPlayersObserver();
+    playersObserver = new MutationObserver(() => {
+      if (detectPlayersNow()) {
+        stopFinderAndCloseUIOnPlayers();
+      }
+    });
+    try {
+      playersObserver.observe(document.documentElement || document.body, {
+        childList: true,
+        subtree: true,
+        characterData: true
+      });
+    } catch {
+      if (document.body) {
+        playersObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+      }
+    }
+  }
+
+  function stopPlayersObserver() {
+    if (playersObserver) {
+      try { playersObserver.disconnect(); } catch {}
+      playersObserver = null;
+    }
+  }
+
+  function stopFinderAndCloseUIOnPlayers() {
+    abortAllControllers();
+    running = false;
+    stopPlayersObserver();
+    removeNotification();
+    showTransientToast('Players detected — UI closed', '#6b7280', 2200);
+  }
+
+  // --- UI creation / update (ONLY create UI when on join page) ---
+  function createOrUpdateNotification(opts = {}) {
+    if (!isJoinPage()) {
+      // Do not create or show UI on non-join pages
+      return;
+    }
+
+    if (!notifRoot) {
+      removeIfExists('gcf-left-notification');
+      const root = document.createElement('div');
+      root.id = 'gcf-left-notification';
+      Object.assign(root.style, {
+        position: 'fixed',
+        left: '18px',
+        top: '18px',
+        zIndex: '999999',
+        background: 'linear-gradient(180deg,#2b2f36,#1f2226)',
+        color: '#fff',
+        padding: '10px 12px',
+        borderRadius: '10px',
+        boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
+        display: 'flex',
+        gap: '12px',
+        alignItems: 'center',
+        fontFamily: 'Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial',
+        minWidth: '220px',
+        maxWidth: '360px',
+        overflow: 'visible'
+      });
+
+      const loader = document.createElement('div');
+      loader.id = 'gcf-loader';
+      Object.assign(loader.style, {
+        width: '44px',
+        height: '44px',
+        borderRadius: '8px',
+        background: '#111217',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        position: 'relative',
+        overflow: 'hidden'
+      });
+
+      const spinner = document.createElement('div');
+      spinner.id = 'gcf-spinner';
+      Object.assign(spinner.style, {
+        width: '18px',
+        height: '18px',
+        borderRadius: '3px',
+        background: 'linear-gradient(180deg,#4b9cff,#2b7be6)',
+        transformOrigin: '50% 50%'
+      });
+
+      removeIfExists('gcf-spinner-style');
+      const style = document.createElement('style');
+      style.id = 'gcf-spinner-style';
+      style.textContent = `
+        @keyframes gcf-spin {
+          0% { transform: rotate(0deg) translateY(0) scale(1); }
+          25% { transform: rotate(90deg) translateY(-2px) scale(1.02); }
+          50% { transform: rotate(180deg) translateY(0) scale(1); }
+          75% { transform: rotate(270deg) translateY(2px) scale(0.98); }
+          100% { transform: rotate(360deg) translateY(0) scale(1); }
+        }
+      `;
+      safeAppendToHead(style);
+
+      loader.appendChild(spinner);
+
+      const content = document.createElement('div');
+      content.style.display = 'flex';
+      content.style.flexDirection = 'column';
+      content.style.gap = '4px';
+      content.style.flex = '1';
+
+      const title = document.createElement('div');
+      title.id = 'gcf-not-title';
+      title.style.fontWeight = '700';
+      title.style.fontSize = '13px';
+      title.textContent = 'Gimkit code finder';
+
+      const status = document.createElement('div');
+      status.id = 'gcf-not-status';
+      status.style.opacity = '0.95';
+      status.style.fontSize = '12px';
+      status.textContent = 'Idle';
+
+      content.appendChild(title);
+      content.appendChild(status);
+
+      const close = document.createElement('button');
+      close.id = 'gcf-not-close';
+      close.textContent = '✕';
+      Object.assign(close.style, {
+        background: 'transparent',
+        border: 'none',
+        color: '#fff',
+        cursor: 'pointer',
+        fontSize: '14px',
+        padding: '6px'
+      });
+      close.addEventListener('click', () => {
+        stopFinder();
+        removeNotification();
+      });
+
+      root.appendChild(loader);
+      root.appendChild(content);
+      root.appendChild(close);
+      safeAppendToBody(root);
+      notifRoot = root;
+    }
+
+    const statusEl = notifRoot.querySelector('#gcf-not-status');
+    const titleEl = notifRoot.querySelector('#gcf-not-title');
+    const spinnerEl = notifRoot.querySelector('#gcf-spinner');
+    const loaderEl = notifRoot.querySelector('#gcf-loader');
+
+    if (opts.title !== undefined) titleEl.textContent = opts.title;
+    if (opts.status !== undefined) statusEl.textContent = opts.status;
+    if (opts.color) spinnerEl.style.background = opts.color;
+
+    if (running && foundCode === null) {
+      loaderEl.style.display = 'flex';
+      spinnerEl.style.animation = 'gcf-spin 700ms linear infinite';
+      spinnerEl.style.opacity = '1';
+    } else {
+      loaderEl.style.display = 'none';
+      spinnerEl.style.animation = 'none';
+      spinnerEl.style.opacity = '0';
+    }
+  }
+
+  function removeNotification() {
+    if (!notifRoot) {
+      removeIfExists('gcf-spinner-style');
+      return;
+    }
+    removeIfExists('gcf-spinner-style');
+    notifRoot.remove();
+    notifRoot = null;
+  }
+
+  // small transient toast
+  function showTransientToast(msg, bg = '#111217', ms = 2000) {
+    removeIfExists('gcf-toast');
+    const t = document.createElement('div');
+    t.id = 'gcf-toast';
+    Object.assign(t.style, {
+      position: 'fixed',
+      top: '18px',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      zIndex: '1000000',
+      background: bg,
+      color: '#fff',
+      padding: '8px 12px',
+      borderRadius: '8px',
+      boxShadow: '0 8px 24px rgba(0,0,0,0.45)',
+      fontFamily: 'Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial',
+      fontSize: '13px'
+    });
+    t.textContent = msg;
+    safeAppendToBody(t);
+    setTimeout(() => t.remove(), ms);
+  }
+
+  // --- Finder: fast loop with abort support ---
+  async function finderLoop() {
+    if (foundCode !== null) return;
+
+    attemptCount = 0;
+    const localController = new AbortController();
+    controllers.push(localController);
+    running = true;
+    createOrUpdateNotification();
+    createOrUpdateNotification({ status: 'Starting...', color: '#4b9cff' });
+
+    startPlayersObserver();
+
+    const headers = {
+      accept: "application/json, text/plain, /",
+      "accept-language": "en-US,en;q=0.9",
+      "content-type": "application/json",
+      "sec-ch-ua": "\"Chromium\";v=\"122\", \"Not(A:Brand\";v=\"24\", \"Google Chrome\";v=\"122\"",
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": "\"Windows\"",
+      "sec-fetch-dest": "empty",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-site": "same-origin"
+    };
+
+    while (running && !localController.signal.aborted && foundCode === null && isJoinPage()) {
+      attemptCount++;
+      createOrUpdateNotification({ status: `Running — attempts: ${attemptCount}`, color: '#22c55e' });
+
+      const code = Math.floor(Math.random() * (999999 - 100000 + 1) + 100000);
+
+      try {
+        const resp = await fetch("https://www.gimkit.com/api/matchmaker/find-info-from-code", {
+          headers,
+          referrer: "https://www.gimkit.com/join/",
+          referrerPolicy: "strict-origin-when-cross-origin",
+          body: `{"code":"${code}"}`,
+          method: "POST",
+          mode: "cors",
+          credentials: "include",
+          signal: localController.signal
+        });
+
+        if (!resp.ok) {
+          if (resp.status === 429) {
+            createOrUpdateNotification({ status: 'Rate limited — stopped', color: '#ff6b6b' });
+            showTransientToast('Too many requests. Try again later.', '#ff6b6b', 3000);
+            stopFinder();
+            break;
+          }
+        } else {
+          foundCode = code;
+          abortAllControllers();
+          running = false;
+
+          createOrUpdateNotification({ title: 'Gimkit code finder', status: `Found: ${code}`, color: '#4b9cff' });
+
+          if (notifRoot && !notifRoot.querySelector('.gcf-code-badge')) {
+            const badge = document.createElement('div');
+            badge.className = 'gcf-code-badge';
+            Object.assign(badge.style, {
+              position: 'absolute',
+              right: '12px',
+              bottom: '12px',
+              background: '#0ea5a4',
+              color: '#fff',
+              padding: '6px 8px',
+              borderRadius: '6px',
+              fontWeight: '700',
+              fontSize: '13px',
+              cursor: 'pointer',
+              boxShadow: '0 6px 14px rgba(0,0,0,0.35)'
+            });
+            badge.textContent = String(code);
+            badge.title = 'Click to copy code';
+            badge.addEventListener('click', async () => {
+              try {
+                await navigator.clipboard.writeText(String(code));
+                const prev = badge.textContent;
+                badge.textContent = 'Copied';
+                setTimeout(() => (badge.textContent = prev), 1400);
+              } catch {
+                const prev = badge.textContent;
+                badge.textContent = 'Copy failed';
+                setTimeout(() => (badge.textContent = prev), 1400);
+              }
+            });
+            notifRoot.appendChild(badge);
+          }
+
+          const inputs = document.getElementsByClassName('sc-eDWCr iVNPcC');
+          for (let i = 0; i < inputs.length; i++) {
+            const item = inputs[i];
+            if (item && item.getAttribute && item.getAttribute('placeholder') === 'Game Code') {
+              try { item.value = code; } catch { item.setAttribute('value', code); }
+            }
+          }
+
+          showTransientToast(`Code found: ${code}`, '#0ea5a4', 3000);
+          break;
+        }
+      } catch (err) {
+        const s = String(err || '');
+        if (s.includes('AbortError')) break;
+        if (s.includes('429')) {
+          createOrUpdateNotification({ status: 'Rate limited — stopped', color: '#ff6b6b' });
+          showTransientToast('Too many requests. Try again later.', '#ff6b6b', 3000);
+          stopFinder();
+          break;
+        }
+      }
+
+      // yield to event loop
+      await Promise.resolve();
+    }
+
+    const idx = controllers.indexOf(localController);
+    if (idx !== -1) controllers.splice(idx, 1);
+    running = false;
+  }
+
+  // --- Control functions ---
+  function startFinder() {
+    if (!isJoinPage()) {
+      showTransientToast('This tool runs only on https://www.gimkit.com/join', '#6b7280', 2000);
+      return;
+    }
+    if (foundCode !== null) {
+      createOrUpdateNotification({ status: `Found: ${foundCode}`, color: '#4b9cff' });
+      return;
+    }
+    if (running) return;
+    finderLoop().catch(e => {
+      console.error('GCF error', e);
+      showTransientToast('Error occurred', '#ff6b6b', 2500);
+      running = false;
+    });
+  }
+
+  function stopFinder() {
+    running = false;
+    abortAllControllers();
+    stopPlayersObserver();
+    if (notifRoot) {
+      createOrUpdateNotification({ status: foundCode ? `Found: ${foundCode}` : 'Stopped', color: '#6b7280' });
+    }
+  }
+
+  // --- Navigation handling: remove UI and stop finder when navigating away (SPA or full reload) ---
+  function onLocationChange() {
+    if (!isJoinPage()) {
+      // stop everything and remove UI when leaving /join
+      running = false;
+      abortAllControllers();
+      stopPlayersObserver();
+      removeNotification();
+    } else {
+      // if we navigated to /join and UI doesn't exist, create it
+      if (!notifRoot) createOrUpdateNotification({ status: foundCode ? `Found: ${foundCode}` : 'Idle', color: '#6b7280' });
+    }
+  }
+
+  // Hook pushState/replaceState to detect SPA navigation
+  (function () {
+    const _push = history.pushState;
+    history.pushState = function () {
+      const res = _push.apply(this, arguments);
+      window.dispatchEvent(new Event('locationchange'));
+      return res;
+    };
+    const _replace = history.replaceState;
+    history.replaceState = function () {
+      const res = _replace.apply(this, arguments);
+      window.dispatchEvent(new Event('locationchange'));
+      return res;
+    };
+    window.addEventListener('popstate', () => window.dispatchEvent(new Event('locationchange')));
+    window.addEventListener('locationchange', onLocationChange);
+  })();
+
+  // --- Key toggle: press 'p' to start/stop (ignores typing) ---
+  function onKey(e) {
+    const active = document.activeElement;
+    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
+    if (!e.key) return;
+    if (e.key.toLowerCase() !== 'p') return;
+
+    if (!isJoinPage()) {
+      showTransientToast('This tool runs only on https://www.gimkit.com/join', '#6b7280', 2000);
+      return;
+    }
+
+    if (foundCode !== null) {
+      createOrUpdateNotification({ status: `Found: ${foundCode}`, color: '#4b9cff' });
+      showTransientToast(`Already found: ${foundCode}`, '#0ea5a4', 2000);
+      return;
+    }
+
+    if (!running) {
+      createOrUpdateNotification({ status: 'Starting...', color: '#4b9cff' });
+      startFinder();
+    } else {
+      createOrUpdateNotification({ status: 'Stopping...', color: '#ff6b6b' });
+      stopFinder();
+    }
+  }
+
+  // Initialize after DOM ready
+  whenDomReady().then(() => {
+    window.addEventListener('keydown', onKey, false);
+    // Only create initial UI if on join page
+    if (isJoinPage()) {
+      createOrUpdateNotification({ status: 'Idle', color: '#6b7280' });
+      if (detectPlayersNow()) {
+        stopFinderAndCloseUIOnPlayers();
+      }
+    }
+    // expose API
+    window.GCF = {
+      start: startFinder,
+      stop: stopFinder,
+      isRunning: () => running,
+      removeUI: removeNotification,
+      getFoundCode: () => foundCode,
+      detectPlayersNow
+    };
+  });
+
+})();
