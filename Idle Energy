@@ -1,6 +1,6 @@
 /**
  * @name IdleEnergy
- * @description auto-answer spammer for 2D gamemodes.
+ * @description auto-answer spammer for 2D gamemodes. Allows you to stop movment to anyone with this plugin instaled via alt + e and brodcast via alt + b the unlock on the lock screen just unlocks you localy
  * @needsLib Communication | https://raw.githubusercontent.com/Gimloader/builds/main/libraries/Communication.js
  * @optionalLib CommandLine | https://raw.githubusercontent.com/Blackhole927/gimkitmods/main/libraries/CommandLine/CommandLine.js
  * @reloadRequired ingame
@@ -467,7 +467,7 @@
             else notifyInfo("IdleEnergyComs", `Unknown command: ${cmd}`);
           };
           if (CommandLine && typeof CommandLine.open === "function") {
-            CommandLine.open({ title: "Control Panel", prompt: "lockmove / unlockmove / unlock", onSubmit });
+            CommandLine.open({ title: "Control Panel", prompt: "lockmove / unlockmove / unlock / clear", onSubmit });
             return;
           }
           if (api && api.UI && typeof api.UI.prompt === "function") {
