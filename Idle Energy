@@ -1,0 +1,677 @@
+/**
+ * @name IdleEnergy
+ * @description auto-answer spammer for 2D gamemodes.
+ * @needsLib Communication | https://raw.githubusercontent.com/Gimloader/builds/main/libraries/Communication.js
+ * @optionalLib CommandLine | https://raw.githubusercontent.com/Blackhole927/gimkitmods/main/libraries/CommandLine/CommandLine.js
+ * @reloadRequired ingame
+ * @author Fireworks760
+ */
+
+(function () {
+  // -------------------------
+  // Notification helper
+  // -------------------------
+  function notify(type, title, message, opts) {
+    try {
+      if (api && api.notifications && typeof api.notifications.create === "function") {
+        api.notifications.create(Object.assign({ title: String(title || ""), message: String(message || ""), type: String(type || "info") }, opts || {}));
+        return;
+      }
+      if (api && api.UI && api.UI.notification && typeof api.UI.notification.open === "function") {
+        api.UI.notification.open(Object.assign({ message: `${title ? title + ": " : ""}${message}` }, opts || {}));
+        return;
+      }
+    } catch (e) {
+      try { if (typeof console !== "undefined" && typeof console.error === "function") console.error(`[${title}] ${message}`, e); } catch (_) {}
+    }
+  }
+  function notifyInfo(title, message, opts) { notify("info", title, message, opts); }
+  function notifyError(title, message, opts) { notify("error", title, message, opts); }
+
+  // -------------------------
+  // IdleEnergyComs (movement lock + comms)
+  // -------------------------
+
+  // -------------------------
+  // Optional libs
+  // -------------------------
+  const Communication = (api && typeof api.lib === "function") ? api.lib("Communication") : null;
+  const CommandLine = (api && typeof api.lib === "function") ? api.lib("CommandLine") : null;
+
+  // -------------------------
+  // Safe hotkey helper
+  // -------------------------
+  function safeAddHotkey(obj) {
+    try { api.hotkeys.addHotkey(obj); return true; } catch (e1) {
+      try {
+        if (typeof obj.callback === "function") {
+          const shallow = Object.assign({}, obj);
+          delete shallow.callback;
+          api.hotkeys.addHotkey(shallow, obj.callback);
+          return true;
+        }
+      } catch (e2) {
+        try { api.hotkeys.addHotkey(obj.key, obj.callback); return true; } catch (e3) {}
+      }
+    }
+    notifyError("IdleEnergyComs", `Hotkey registration failed for ${obj && obj.key ? obj.key : "unknown key"}.`);
+    return false;
+  }
+
+  // -------------------------
+  // Communication setup (create early)
+  // -------------------------
+  let comms = null;
+  try {
+    if (Communication) comms = new Communication("IdleEnergyComs_global");
+  } catch (e) {
+    comms = null;
+  }
+  try { if (comms && typeof comms.enable === "function" && !comms.enabled) comms.enable(); } catch (_) {}
+
+  // -------------------------
+  // Global state (exposed)
+  // -------------------------
+  window.__IdleEnergyComs = window.__IdleEnergyComs || {};
+  // Global movement lock (applies to everyone when broadcast)
+  window.__IdleEnergyComs._movementLockedGlobal = false;
+  // Local-only unlocked flag (keeps track of local unlocked override)
+  window.__IdleEnergyComs._movementUnlockedLocal = false;
+  // Local override: null = follow global; true = force unlocked locally
+  if (typeof window.__IdleEnergyComs._localOverride === "undefined") window.__IdleEnergyComs._localOverride = null;
+  // Local echo default (so same-client testing works)
+  if (typeof window.__IdleEnergyComs.localEchoBroadcasts === "undefined") window.__IdleEnergyComs.localEchoBroadcasts = true;
+
+  // -------------------------
+  // Movement keys and throttle
+  // -------------------------
+  const movementKeys = new Set(["KeyW","KeyA","KeyS","KeyD","ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"]);
+  const keyOpenCooldownMs = 800;
+  let lastPromptOpenAt = 0;
+
+  // -------------------------
+  // UI helper: transient message
+  // -------------------------
+  function showMovementLockedMessage(durationMs) {
+    const duration = typeof durationMs === "number" ? durationMs : 900;
+    try {
+      if (api && api.UI && api.UI.notification && typeof api.UI.notification.open === "function") {
+        api.UI.notification.open({ message: "Movement locked", duration });
+        return true;
+      }
+      if (api && api.notifications && typeof api.notifications.create === "function") {
+        api.notifications.create({ title: "", message: "Movement locked", type: "info", duration });
+        return true;
+      }
+    } catch (_) {}
+    // DOM fallback
+    try {
+      const id = "idle-energy-coms-top-msg";
+      let el = document.getElementById(id);
+      if (!el) {
+        el = document.createElement("div");
+        el.id = id;
+        el.style.position = "fixed";
+        el.style.top = "8px";
+        el.style.left = "50%";
+        el.style.transform = "translateX(-50%)";
+        el.style.zIndex = 999999;
+        el.style.background = "rgba(0,0,0,0.8)";
+        el.style.color = "#fff";
+        el.style.padding = "8px 12px";
+        el.style.borderRadius = "6px";
+        el.style.fontFamily = "sans-serif";
+        el.style.fontSize = "13px";
+        el.style.pointerEvents = "none";
+        document.body.appendChild(el);
+      }
+      el.textContent = "Movement locked";
+      el.style.opacity = "1";
+      clearTimeout(el._idleEnergyTimeout);
+      el._idleEnergyTimeout = setTimeout(() => { try { el.style.transition = "opacity 200ms ease"; el.style.opacity = "0"; } catch (_) {} }, duration);
+      return true;
+    } catch (_) {}
+    return false;
+  }
+
+  // -------------------------
+  // Core state mutators (idempotent)
+  // -------------------------
+  function applyGlobalMovementLock(value, meta) {
+    window.__IdleEnergyComs._movementLockedGlobal = !!value;
+    if (typeof window.__IdleEnergyComs.onGlobalMovementLockChanged === "function") {
+      try { window.__IdleEnergyComs.onGlobalMovementLockChanged(window.__IdleEnergyComs._movementLockedGlobal, meta || {}); } catch (_) {}
+    }
+  }
+
+  function applyLocalUnlock(meta) {
+    window.__IdleEnergyComs._movementUnlockedLocal = true;
+    window.__IdleEnergyComs._localOverride = true;
+    if (typeof window.__IdleEnergyComs.onLocalUnlock === "function") {
+      try { window.__IdleEnergyComs.onLocalUnlock(meta || {}); } catch (_) {}
+    }
+  }
+
+  function clearLocalOverride(meta) {
+    window.__IdleEnergyComs._localOverride = null;
+    window.__IdleEnergyComs._movementUnlockedLocal = false;
+    if (typeof window.__IdleEnergyComs.onLocalOverrideCleared === "function") {
+      try { window.__IdleEnergyComs.onLocalOverrideCleared(meta || {}); } catch (_) {}
+    }
+  }
+
+  // -------------------------
+  // Incoming comms handler (attached early)
+  // -------------------------
+  function onCommsMessage(message, char) {
+    try {
+      const cmd = String(message || "").trim().toUpperCase();
+      if (!cmd) return;
+
+      switch (cmd) {
+        case "PING":
+          try { if (comms && typeof comms.send === "function" && comms.enabled) comms.send("PONG"); } catch (_) {}
+          break;
+        case "PONG":
+          notifyInfo("IdleEnergyComs", "Remote responded (PONG)");
+          break;
+        case "LOCKMOVE":
+          applyGlobalMovementLock(true, { source: "remote", by: char || null });
+          notifyInfo("Gimkit", `Movement locked (global${char && char.name ? `: ${char.name}` : ""})`);
+          break;
+        case "UNLOCKMOVE":
+          applyGlobalMovementLock(false, { source: "remote", by: char || null });
+          notifyInfo("Gimkit", `Movement unlocked (global${char && char.name ? `: ${char.name}` : ""})`);
+          break;
+        case "FORCE_UNLOCK_LOCAL":
+          applyLocalUnlock({ source: "remote", by: char || null });
+          notifyInfo("Gimkit", `Local override: unlocked by ${char && char.name ? char.name : "remote"}`);
+          break;
+        case "CLEAR_LOCAL_OVERRIDE":
+          clearLocalOverride({ source: "remote", by: char || null });
+          notifyInfo("Gimkit", `Local override cleared by ${char && char.name ? char.name : "remote"}`);
+          break;
+        default:
+          break;
+      }
+    } catch (e) {
+      notifyError("IdleEnergyComs", `Error processing incoming message: ${e && e.message ? e.message : e}`);
+    }
+  }
+
+  try { if (comms && typeof comms.onMessage === "function") comms.onMessage(onCommsMessage); } catch (_) {}
+
+  // -------------------------
+  // Safe broadcast helper
+  // - Applies the command locally immediately (so same-client reacts instantly)
+  // - Then attempts to send to the network for other clients
+  // -------------------------
+  function safeBroadcast(cmd) {
+    const c = String(cmd || "").trim().toUpperCase();
+
+    // 1) Apply locally immediately (synchronous) for instant responsiveness
+    try {
+      if (window.__IdleEnergyComs && window.__IdleEnergyComs.localEchoBroadcasts) {
+        // Use the same handler path to keep behavior consistent
+        const fakeChar = {
+          id: (api && api.stores && api.stores.network && api.stores.network.authId) || "local-echo",
+          name: (api && api.stores && api.stores.network && api.stores.network.authName) || "You (local)"
+        };
+        try { onCommsMessage(c, fakeChar); } catch (_) {}
+      } else {
+        // If local echo disabled, still apply the most important local changes directly
+        if (c === "UNLOCKMOVE") applyGlobalMovementLock(false, { source: "local" });
+        else if (c === "LOCKMOVE") applyGlobalMovementLock(true, { source: "local" });
+        else if (c === "CLEAR_LOCAL_OVERRIDE") clearLocalOverride({ source: "local" });
+        else if (c === "FORCE_UNLOCK_LOCAL") applyLocalUnlock({ source: "local" });
+      }
+    } catch (e) {
+      try { console.warn("safeBroadcast local apply failed:", e && e.message ? e.message : e); } catch (_) {}
+    }
+
+    // 2) Then attempt to send to network (best-effort)
+    try {
+      if (comms && typeof comms.send === "function") {
+        if (typeof comms.enabled === "undefined" || comms.enabled) comms.send(String(cmd));
+        else if (typeof comms.enable === "function") {
+          try { comms.enable(); comms.send(String(cmd)); } catch (_) {}
+        }
+      }
+    } catch (e) {
+      try { console.warn("safeBroadcast network send failed:", e && e.message ? e.message : e); } catch (_) {}
+    }
+  }
+
+  // -------------------------
+  // Plugin messaging (broadcast + local display)
+  // -------------------------
+  (function () {
+    // Send a plugin message. If localOnly is true, only show locally.
+    function sendPluginMessage(text, opts) {
+      opts = opts || {};
+      if (!text || !String(text).trim()) return;
+      const payload = "MSG:" + String(text);
+      if (opts.localOnly) {
+        try { notifyInfo("IdleEnergy (local)", String(text)); } catch (_) {}
+        return;
+      }
+      try {
+        // Use safeBroadcast so local echo + network send are handled consistently
+        safeBroadcast(payload);
+        try { notifyInfo("IdleEnergy (sent)", String(text)); } catch (_) {}
+      } catch (e) {
+        try { notifyError("IdleEnergy", "Failed to send plugin message: " + (e && e.message ? e.message : e)); } catch (_) {}
+      }
+    }
+
+    // Wrap existing onCommsMessage to also handle MSG: payloads
+    try {
+      const originalOnCommsMessage = typeof onCommsMessage === "function" ? onCommsMessage : null;
+      function onCommsMessageWithChat(message, char) {
+        try { if (originalOnCommsMessage) originalOnCommsMessage(message, char); } catch (_) {}
+        try {
+          const msg = String(message || "");
+          if (!msg) return;
+          if (msg.startsWith("MSG:")) {
+            const text = msg.slice(4);
+            const title = char && char.name ? `Message from ${char.name}` : "Message";
+            try { notifyInfo(title, text); } catch (_) {}
+          }
+        } catch (_) {}
+      }
+
+      // Rebind comms handler if possible
+      try {
+        if (comms && typeof comms.onMessage === "function") {
+          // If comms supports multiple handlers, this will add another; otherwise it will replace.
+          comms.onMessage(onCommsMessageWithChat);
+        } else {
+          // Fallback: replace global onCommsMessage reference so other code calling it will hit wrapper
+          try { onCommsMessage = onCommsMessageWithChat; } catch (_) {}
+        }
+      } catch (_) {}
+    } catch (_) {}
+
+    // Register a command to send messages
+    try {
+      if (api && api.commands && typeof api.commands.addCommand === "function") {
+        api.commands.addCommand({ text: "msg", hidden: false }, (context) => {
+          (async () => {
+            try {
+              let text = null;
+              if (context && typeof context.input === "string" && context.input.trim()) {
+                text = context.input.trim();
+              } else if (context && typeof context.select === "function") {
+                // If the command UI supports a prompt, use it
+                text = await context.select({ title: "Message", options: [{ label: "Type message", value: "prompt" }] });
+                if (text === "prompt") text = prompt("Message:");
+              } else {
+                text = prompt("Message:");
+              }
+              if (!text) return;
+              sendPluginMessage(text, { localOnly: false });
+            } catch (e) { try { notifyError("IdleEnergy", "Failed to run msg command: " + (e && e.message ? e.message : e)); } catch (_) {} }
+          })();
+        });
+
+        // Local-only message command
+        api.commands.addCommand({ text: "msgLocal", hidden: false }, () => {
+          try {
+            const text = prompt("Local message (not broadcast):");
+            if (!text) return;
+            sendPluginMessage(text, { localOnly: true });
+          } catch (e) { try { notifyError("IdleEnergy", "Failed to run msgLocal command: " + (e && e.message ? e.message : e)); } catch (_) {} }
+        });
+      }
+    } catch (_) {}
+
+    // Hotkey to prompt and send a message
+    try {
+      safeAddHotkey({
+        key: "KeyB",
+        alt: true,
+        description: "Prompt and send plugin message",
+        callback: function () {
+          try {
+            const text = prompt("Message to send (broadcast):");
+            if (!text) return;
+            sendPluginMessage(text, { localOnly: false });
+          } catch (e) { try { notifyError("IdleEnergy", "Failed to send message via hotkey: " + (e && e.message ? e.message : e)); } catch (_) {} }
+        }
+      });
+    } catch (_) {}
+
+  })();
+
+  // -------------------------
+  // Movement blocking logic
+  // -------------------------
+  function isMovementBlocked() {
+    const override = window.__IdleEnergyComs._localOverride;
+    if (override === true) return false; // forced unlocked locally
+    return !!window.__IdleEnergyComs._movementLockedGlobal;
+  }
+
+  function onMovementKeydown(e) {
+    try {
+      if (!isMovementBlocked()) return;
+      const code = e.code || e.key || "";
+      if (!movementKeys.has(code)) return;
+
+      const now = Date.now();
+      if (now - lastPromptOpenAt < keyOpenCooldownMs) {
+        try { if (e && typeof e.preventDefault === "function") e.preventDefault(); } catch (_) {}
+        try { if (e && typeof e.stopPropagation === "function") e.stopPropagation(); } catch (_) {}
+        return;
+      }
+      lastPromptOpenAt = now;
+
+      try { if (e && typeof e.preventDefault === "function") e.preventDefault(); } catch (_) {}
+      try { if (e && typeof e.stopPropagation === "function") e.stopPropagation(); } catch (_) {}
+
+      const opened = showMovementLockedMessage(900);
+      if (!opened) notifyInfo("IdleEnergyComs", "Movement locked (global)", { duration: 900 });
+    } catch (err) {
+      notifyError("IdleEnergyComs", `Movement key handler error: ${err && err.message ? err.message : err}`);
+    }
+  }
+
+  try { window.addEventListener("keydown", onMovementKeydown, { capture: true, passive: false }); } catch (e) { try { window.addEventListener("keydown", onMovementKeydown); } catch (_) {} }
+
+  // -------------------------
+  // Public functions and commands
+  // -------------------------
+  function lockmove_global() {
+    // apply locally immediately
+    applyGlobalMovementLock(true, { source: "local" });
+    // broadcast to others
+    safeBroadcast("LOCKMOVE");
+  }
+
+  function unlockmove_global() {
+    // apply locally immediately
+    applyGlobalMovementLock(false, { source: "local" });
+
+    // ask others to clear overrides that would block the unlock
+    safeBroadcast("CLEAR_LOCAL_OVERRIDE");
+
+    // broadcast the global unlock
+    safeBroadcast("UNLOCKMOVE");
+  }
+
+  function unlock_local() {
+    applyLocalUnlock({ source: "local" });
+    notifyInfo("IdleEnergyComs", "You are locally unlocked (override set)");
+  }
+
+  function force_local_unlock() {
+    applyLocalUnlock({ source: "local" });
+    safeBroadcast("FORCE_UNLOCK_LOCAL");
+    notifyInfo("IdleEnergyComs", "Local override: unlocked (and broadcasted)");
+  }
+
+  function clear_local_override_and_follow_global() {
+    clearLocalOverride({ source: "local" });
+    safeBroadcast("CLEAR_LOCAL_OVERRIDE");
+  }
+
+  // Register commands (if api.commands available)
+  try {
+    if (api && api.commands && typeof api.commands.addCommand === "function") {
+      api.commands.addCommand({ text: "lockmove" }, () => { lockmove_global(); notifyInfo("IdleEnergyComs", "Movement locked (global)"); });
+      api.commands.addCommand({ text: "unlockmove" }, () => { unlockmove_global(); notifyInfo("IdleEnergyComs", "Movement unlocked (global)"); });
+      api.commands.addCommand({ text: "unlock" }, () => { unlock_local(); });
+      api.commands.addCommand({ text: "force_local_unlock" }, () => { force_local_unlock(); });
+      api.commands.addCommand({ text: "clear_local_override" }, () => { clear_local_override_and_follow_global(); });
+    }
+  } catch (_) {}
+
+  // Expose API on window
+  try {
+    window.__IdleEnergyComs.lockmove_global = lockmove_global;
+    window.__IdleEnergyComs.unlockmove_global = unlockmove_global;
+    window.__IdleEnergyComs.unlock_local = unlock_local;
+    window.__IdleEnergyComs.force_local_unlock = force_local_unlock;
+    window.__IdleEnergyComs.clear_local_override = clear_local_override_and_follow_global;
+    window.__IdleEnergyComs.isMovementLockedGlobal = function () { return !!window.__IdleEnergyComs._movementLockedGlobal; };
+    window.__IdleEnergyComs.getLocalOverride = function () { return window.__IdleEnergyComs._localOverride; };
+    window.__IdleEnergyComs.broadcast = function (s) { safeBroadcast(String(s)); };
+    window.__IdleEnergyComs.comms = comms;
+
+    // convenience globals
+    window.lockmove_global = window.lockmove_global || function () { window.__IdleEnergyComs.lockmove_global(); };
+    window.unlockmove_global = window.unlockmove_global || function () { window.__IdleEnergyComs.unlockmove_global(); };
+    window.unlock_local = window.unlock_local || function () { window.__IdleEnergyComs.unlock_local(); };
+    window.force_local_unlock = window.force_local_unlock || function () { window.__IdleEnergyComs.force_local_unlock(); };
+    window.clear_local_override = window.clear_local_override || function () { window.__IdleEnergyComs.clear_local_override(); };
+  } catch (_) {}
+
+  // -------------------------
+  // Hotkey / control UI
+  // -------------------------
+  try {
+    safeAddHotkey({
+      key: "KeyE",
+      alt: true,
+      description: "Open control UI (lock/unlock)",
+      callback: function () {
+        try {
+          const onSubmit = function (input) {
+            const cmd = String(input || "").trim().toLowerCase();
+            if (!cmd) return;
+            if (cmd === "lockmove") { lockmove_global(); notifyInfo("Gimkit", "Movement locked (global)"); }
+            else if (cmd === "unlockmove") { unlockmove_global(); notifyInfo("Gimkit", "Movement unlocked (global)"); }
+            else if (cmd === "unlock") { unlock_local(); }
+            else if (cmd === "force_local_unlock") { force_local_unlock(); }
+            else if (cmd === "clear") { clear_local_override_and_follow_global(); }
+            else notifyInfo("IdleEnergyComs", `Unknown command: ${cmd}`);
+          };
+          if (CommandLine && typeof CommandLine.open === "function") {
+            CommandLine.open({ title: "Control Panel", prompt: "lockmove / unlockmove / unlock", onSubmit });
+            return;
+          }
+          if (api && api.UI && typeof api.UI.prompt === "function") {
+            api.UI.prompt("lockmove / unlockmove / unlock", onSubmit);
+            return;
+          }
+          const res = prompt("lockmove / unlockmove / unlock");
+          onSubmit(res);
+        } catch (e) {
+          notifyError("IdleEnergyComs", `Failed to open control UI: ${e && e.message ? e.message : e}`);
+        }
+      }
+    });
+  } catch (_) {}
+
+  // -------------------------
+  // Add command to open the UI (merged in)
+  // -------------------------
+  (function () {
+    function openIdleEnergyControlUI() {
+      try {
+        const onSubmit = function (input) {
+          const cmd = String(input || "").trim().toLowerCase();
+          if (!cmd) return;
+          if (cmd === "lockmove") { lockmove_global(); notifyInfo("Gimkit", "Movement locked (global)"); }
+          else if (cmd === "unlockmove") { unlockmove_global(); notifyInfo("Gimkit", "Movement unlocked (global)"); }
+          else if (cmd === "unlock") { unlock_local(); }
+          else if (cmd === "force_local_unlock") { force_local_unlock(); }
+          else if (cmd === "clear_local_override") { clear_local_override_and_follow_global(); }
+          else notifyInfo("IdleEnergyComs", `Unknown command: ${cmd}`);
+        };
+
+        if (CommandLine && typeof CommandLine.open === "function") {
+          CommandLine.open({ title: "Control Panel", prompt: "lockmove / unlockmove / unlock", onSubmit });
+          return;
+        }
+        if (api && api.UI && typeof api.UI.prompt === "function") {
+          api.UI.prompt("lockmove / unlockmove / unlock", onSubmit);
+          return;
+        }
+        const res = prompt("lockmove / unlockmove / unlock");
+        onSubmit(res);
+      } catch (e) {
+        notifyError("IdleEnergyComs", `Failed to open control UI: ${e && e.message ? e.message : e}`);
+      }
+    }
+
+    try {
+      if (api && api.commands && typeof api.commands.addCommand === "function") {
+        api.commands.addCommand({ text: "openIdleUI" }, openIdleEnergyControlUI);
+        api.commands.addCommand({ text: "idleui" }, openIdleEnergyControlUI);
+      }
+    } catch (_) {}
+
+    try { window.openIdleEnergyControlUI = window.openIdleEnergyControlUI || openIdleEnergyControlUI; } catch (_) {}
+  })();
+
+  // -------------------------
+  // Comms lifecycle: announce presence and cleanup
+  // -------------------------
+  try {
+    if (comms && typeof comms.onEnabledChanged === "function") {
+      comms.onEnabledChanged(() => {
+        if (!comms.enabled) return;
+        try { comms.send("PLUGIN_ON"); } catch (_) {}
+      });
+      api.onStop(() => {
+        if (!comms.enabled) return;
+        try { comms.send("PLUGIN_OFF"); } catch (_) {}
+        if (typeof comms.destroy === "function") comms.destroy();
+      });
+    }
+  } catch (_) {}
+
+  // -------------------------
+  // IdleEnergy (auto-answer spammer) — merged below unchanged
+  // -------------------------
+
+  /**
+   * @name IdleEnergy
+   * @description auto-answer spammer for 2D gamemodes. Toggle with Q. Automatically switches to a slower mode when answering questions with an actual answer.
+   * @author Fireworks760
+   * @version 0.5.2
+   * @reloadRequired ingame
+   */
+
+  var questions = [];
+  var answerDeviceId;
+
+  // Toggle starts OFF
+  let autoAnswerEnabled = false;
+
+  // -------------------------
+  //  NEW TOGGLE (Alt + T)
+  // -------------------------
+
+  function toggleIdleEnergy() {
+    autoAnswerEnabled = !autoAnswerEnabled;
+  }
+
+  // Configurable hotkey (Alt + T)
+  try {
+    api.hotkeys.addConfigurableHotkey(
+      {
+        category: "ToggleIdleEnergy",
+        title: "auto-answer spammer for 2D gamemodes.",
+        default: {
+          key: "KeyQ",
+        }
+      },
+      toggleIdleEnergy
+    );
+  } catch (e) {
+    // If hotkey registration fails, notify but continue
+    try { notifyError("IdleEnergy", "Failed to register configurable hotkey: " + (e && e.message ? e.message : e)); } catch (_) {}
+  }
+
+  // Console command
+  try {
+    api.net.onLoad(() => {
+      try {
+        api.commands.addCommand(
+          { text: "Toggle Idle Energy" },
+          toggleIdleEnergy
+        );
+      } catch (e) {
+        try { notifyError("IdleEnergy", "Failed to register command: " + (e && e.message ? e.message : e)); } catch (_) {}
+      }
+    });
+  } catch (_) {}
+
+  // -------------------------
+  //  AUTO ANSWER LOGIC
+  // -------------------------
+
+  function answerQuestion() {
+    if (!autoAnswerEnabled) return;
+    if (!questions.length) return;
+
+    const question = questions[questions.length - 1];
+    if (!question) return;
+
+    const packet = {
+      key: "answered",
+      deviceId: answerDeviceId,
+      data: {}
+    };
+
+    if (question.type === "text") {
+      packet.data.answer = question.answers[0].text;
+    } else {
+      const correctAnswerId = question.answers.find((a) => a.correct)._id;
+      packet.data.answer = correctAnswerId;
+    }
+
+    try { api.net.send("MESSAGE_FOR_DEVICE", packet); } catch (e) { try { notifyError("IdleEnergy", "Failed to send answer packet: " + (e && e.message ? e.message : e)); } catch (_) {} }
+  }
+
+  // Listen for new questions
+  try {
+    api.net.on("DEVICES_STATES_CHANGES", (event) => {
+      for (const change of event.changes) {
+        const id = change[0];
+
+        for (let i = 0; i < change[1].length; i++) {
+          const index = change[1][i];
+          const key = event.values[index];
+          const value = change[2][i];
+
+          if (key === "GLOBAL_questions") {
+            try {
+              questions = JSON.parse(value);
+              answerDeviceId = id;
+            } catch (e) {
+              try { notifyError("IdleEnergy", "Failed to parse questions JSON: " + (e && e.message ? e.message : e)); } catch (_) {}
+            }
+          }
+        }
+      }
+    });
+  } catch (e) {
+    try { notifyError("IdleEnergy", "Failed to attach DEVICES_STATES_CHANGES listener: " + (e && e.message ? e.message : e)); } catch (_) {}
+  }
+
+  // Ultra-fast loop
+  try {
+    api.net.onLoad(() => {
+      try { api.UI.notification.open({ message: "IdleEnergy active" }); } catch (_) {}
+
+      let running = true;
+
+      function loop() {
+        if (!running) return;
+        answerQuestion();
+        requestAnimationFrame(loop);
+      }
+
+      requestAnimationFrame(loop);
+
+      api.onStop(() => (running = false));
+    });
+  } catch (e) {
+    try { notifyError("IdleEnergy", "Failed to start auto-answer loop: " + (e && e.message ? e.message : e)); } catch (_) {}
+  }
+
+  // Plugin loaded silently
+})();
