@@ -1,0 +1,61 @@
+/**
+ * @name GimkitTab
+ * @description A plugin that opens the leaderboard on the press of tab inspired by minecraft
+ * @author Fireworks760
+ * @version 2.3.0
+ */
+
+(function() {
+  'use strict';
+
+  // Selectors provided
+  const LEADERBOARD_OPEN_SELECTOR = "#content > div > div > div.sc-chKHoF.hTnIzT > div > div.sc-gByRMG.llaEJx.maxAll > div > div.sc-dRpCaM.isPqew.light-shadow.flex.between.vc > div.sc-jkqJTp.fVPwAR.flex.vc > div:nth-child(3) > div:nth-child(1) > div > button > span.btn-front";
+  const LEADERBOARD_CLOSE_SELECTOR = "#content > div > div > div.sc-chKHoF.hTnIzT > div > div.sc-gByRMG.llaEJx.maxAll > div > div.sc-fdbPbf.giHpvm.maxWidth.flex > i";
+
+  let refreshInterval = null;
+
+  function clickLeaderboardOpen() {
+    const btn = document.querySelector(LEADERBOARD_OPEN_SELECTOR);
+    if (btn) {
+      btn.click();
+    }
+  }
+
+  function clickLeaderboardClose() {
+    const btn = document.querySelector(LEADERBOARD_CLOSE_SELECTOR);
+    if (btn) {
+      btn.click();
+    }
+  }
+
+  function startAutoRefresh() {
+    if (refreshInterval) return;
+    
+    // Optional: Keep refreshing the leaderboard view while held
+    refreshInterval = setInterval(function() {
+      clickLeaderboardOpen();
+    }, 2000);
+  }
+
+  function stopAutoRefresh() {
+    if (refreshInterval) {
+      clearInterval(refreshInterval);
+      refreshInterval = null;
+    }
+  }
+
+  window.addEventListener("keydown", function(e) {
+    if (e.key === "Tab") {
+      e.preventDefault();
+      clickLeaderboardOpen();
+      startAutoRefresh();
+    }
+  });
+
+  window.addEventListener("keyup", function(e) {
+    if (e.key === "Tab") {
+      stopAutoRefresh();
+      clickLeaderboardClose();
+    }
+  });
+})();
