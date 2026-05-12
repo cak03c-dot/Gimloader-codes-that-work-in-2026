@@ -3,6 +3,7 @@
  * @description A plugin that opens the leaderboard on the press of tab inspired by minecraft
  * @author Fireworks760
  * @version 2.3.0
+ * @downloadUrl https://github.com/cak03c-dot/Gimloader-codes-that-work-in-2026/blob/main/Gimkit%20Tab
  */
 
 (function() {
