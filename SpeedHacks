@@ -2,9 +2,11 @@
  * @name SpeedHacks
  * @description Speed hacks inspired by TheLazySquid's Gimkit Hacks script but adapted to work in gimloader
  * @author Fireworks760
- * @version 1.4.0
+ * @version 1.4.1
  * @UpdateURL https://github.com/cak03c-dot/Gimloader-codes-that-work-in-2026/blob/main/SpeedHacks
  * @DownloadURL https://github.com/cak03c-dot/Gimloader-codes-that-work-in-2026/blob/main/SpeedHacks
+ * @webpageURL https://github.com/cak03c-dot/Gimloader-codes-that-work-in-2026/edit/main/SpeedHacks
+ * @changelog Added the webpage url
  */
 
 let speedEnabled = false;
