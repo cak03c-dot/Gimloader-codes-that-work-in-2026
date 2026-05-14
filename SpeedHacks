@@ -1,0 +1,266 @@
+/**
+ * @name SpeedHacks
+ * @description Speed hacks inspired by TheLazySquid's Gimkit Hacks script but adapted to work in gimloader
+ * @author Fireworks760
+ * @version 1.4.0
+ * @UpdateURL 
+ * @DownloadURL 
+ */
+
+let speedEnabled = false;
+let speedMultiplier = 1.3;
+
+let overlay;
+let ctx;
+
+// ======================
+// GAME HOOKS
+// ======================
+
+function getGame() {
+    return window;
+}
+
+function getPlayer() {
+    return getGame()?.stores?.me;
+}
+
+function getCamera() {
+    return getGame()?.stores?.phaser?.scene?.cameras?.cameras?.[0];
+}
+
+function getCharacters() {
+    return getGame()?.serializer?.state?.characters?.$items;
+}
+
+// ======================
+// SPEED SYSTEM
+// ======================
+
+let nativeSpeed = null;
+
+function applySpeed() {
+    const player = getPlayer();
+
+    if (!player) return;
+
+    if (nativeSpeed === null) {
+        nativeSpeed = player.movementSpeed;
+    }
+
+    if (speedEnabled) {
+        player.movementSpeed = nativeSpeed * speedMultiplier;
+    } else {
+        player.movementSpeed = nativeSpeed;
+    }
+}
+
+// Prevent speed reset
+setInterval(() => {
+
+    const player = getPlayer();
+
+    if (!player) return;
+
+    if (
+        speedEnabled &&
+        nativeSpeed !== null &&
+        player.movementSpeed !== nativeSpeed * speedMultiplier
+    ) {
+        applySpeed();
+    }
+
+}, 250);
+
+// ======================
+// CONFIGURABLE HOTKEY
+// ======================
+
+api.hotkeys.addConfigurableHotkey({
+
+    category: "Speed Hacks",
+    title: "Toggle Speed",
+    preventDefault: false,
+
+    default: {
+        key: "KeyE"
+    }
+
+}, () => {
+
+    speedEnabled = !speedEnabled;
+
+    applySpeed();
+
+    console.log(
+        `[GL] Speed ${
+            speedEnabled
+                ? "enabled"
+                : "disabled"
+        }`
+    );
+});
+
+// ======================
+// PLAYER TRACKER
+// ======================
+
+function createCanvas() {
+
+    overlay = document.createElement("canvas");
+
+    overlay.width = window.innerWidth;
+    overlay.height = window.innerHeight;
+
+    overlay.style.position = "fixed";
+    overlay.style.left = "0";
+    overlay.style.top = "0";
+    overlay.style.width = "100vw";
+    overlay.style.height = "100vh";
+    overlay.style.pointerEvents = "none";
+    overlay.style.zIndex = "999999";
+
+    document.documentElement.appendChild(overlay);
+
+    ctx = overlay.getContext("2d");
+}
+
+window.addEventListener("resize", () => {
+
+    if (!overlay) return;
+
+    overlay.width = window.innerWidth;
+    overlay.height = window.innerHeight;
+});
+
+function renderTracker() {
+
+    if (!ctx) {
+        requestAnimationFrame(renderTracker);
+        return;
+    }
+
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+    const camera = getCamera();
+    const characters = getCharacters();
+
+    if (!camera || !characters) {
+        requestAnimationFrame(renderTracker);
+        return;
+    }
+
+    const localPlayer =
+        characters.get(
+            getGame()?.stores?.network?.authId
+        );
+
+    if (!localPlayer) {
+        requestAnimationFrame(renderTracker);
+        return;
+    }
+
+    const camX = camera.midPoint.x;
+    const camY = camera.midPoint.y;
+
+    for (const [id, character] of characters) {
+
+        if (id === localPlayer.id) continue;
+
+        const isTeammate =
+            character.teamId === localPlayer.teamId;
+
+        const angle = Math.atan2(
+            character.y - camY,
+            character.x - camX
+        );
+
+        const distance = Math.sqrt(
+            (character.x - camX) ** 2 +
+            (character.y - camY) ** 2
+        );
+
+        const arrowDist = Math.min(250, distance);
+
+        const x =
+            Math.cos(angle) * arrowDist +
+            overlay.width / 2;
+
+        const y =
+            Math.sin(angle) * arrowDist +
+            overlay.height / 2;
+
+        const left = angle + Math.PI * 0.75;
+        const right = angle - Math.PI * 0.75;
+
+        ctx.beginPath();
+
+        ctx.moveTo(x, y);
+
+        ctx.lineTo(
+            x + Math.cos(left) * 35,
+            y + Math.sin(left) * 35
+        );
+
+        ctx.moveTo(x, y);
+
+        ctx.lineTo(
+            x + Math.cos(right) * 35,
+            y + Math.sin(right) * 35
+        );
+
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = isTeammate ? "lime" : "red";
+        ctx.stroke();
+
+        ctx.font = "16px Arial";
+        ctx.fillStyle = "white";
+        ctx.textAlign = "center";
+
+        ctx.fillText(
+            `${character.name} (${Math.floor(distance)})`,
+            x,
+            y - 15
+        );
+    }
+
+    requestAnimationFrame(renderTracker);
+}
+
+// ======================
+// CLEANUP
+// ======================
+
+api.onStop(() => {
+
+    if (overlay) {
+        overlay.remove();
+    }
+
+    const player = getPlayer();
+
+    if (player && nativeSpeed !== null) {
+        player.movementSpeed = nativeSpeed;
+    }
+});
+
+// ======================
+// START
+// ======================
+
+function startPlugin() {
+
+    if (!document.documentElement) {
+        setTimeout(startPlugin, 100);
+        return;
+    }
+
+    createCanvas();
+    renderTracker();
+
+    console.log(
+        "[GL] Loaded speed + tracker plugin"
+    );
+}
+
+startPlugin();
