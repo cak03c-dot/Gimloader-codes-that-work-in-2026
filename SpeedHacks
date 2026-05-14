@@ -6,7 +6,7 @@
  * @UpdateURL https://github.com/cak03c-dot/Gimloader-codes-that-work-in-2026/blob/main/SpeedHacks
  * @DownloadURL https://github.com/cak03c-dot/Gimloader-codes-that-work-in-2026/blob/main/SpeedHacks
  * @webpage https://github.com/cak03c-dot/Gimloader-codes-that-work-in-2026/blob/main/SpeedHacks
- * @changelog Added the webpage url h
+ * @changelog Added the webpage url
  */
 
 let speedEnabled = false;
