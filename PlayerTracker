@@ -1,0 +1,292 @@
+/**
+ * @name PlayerTracker
+ * @description Player tracker inspired by TheLazySquid's Gimkit Hacks code has a hotkey in the hotkey tab on the gimloader page
+ * @author Frieworks760
+ * @version 2.3.1
+ */
+let trackerEnabled = true;
+
+let overlay;
+let ctx;
+
+// ======================
+// HOTKEY
+// ======================
+
+api.hotkeys.addConfigurableHotkey({
+
+    category: "Player Tracker",
+    title: "Toggle Tracker",
+    preventDefault: false,
+
+    default: {
+        key: "Digit1"
+    }
+
+}, () => {
+
+    trackerEnabled = !trackerEnabled;
+
+    console.log(
+        `[GL] Tracker ${
+            trackerEnabled
+                ? "enabled"
+                : "disabled"
+        }`
+    );
+});
+
+// ======================
+// CANVAS
+// ======================
+
+function createCanvas() {
+
+    overlay = document.createElement("canvas");
+
+    overlay.width = window.innerWidth;
+    overlay.height = window.innerHeight;
+
+    overlay.style.position = "fixed";
+    overlay.style.left = "0";
+    overlay.style.top = "0";
+    overlay.style.width = "100vw";
+    overlay.style.height = "100vh";
+    overlay.style.pointerEvents = "none";
+    overlay.style.zIndex = "999999";
+
+    document.documentElement.appendChild(overlay);
+
+    ctx = overlay.getContext("2d");
+}
+
+window.addEventListener("resize", () => {
+
+    if (!overlay) return;
+
+    overlay.width = window.innerWidth;
+    overlay.height = window.innerHeight;
+});
+
+// ======================
+// TRACKER
+// ======================
+
+function renderTracker() {
+
+    if (!ctx) {
+        requestAnimationFrame(renderTracker);
+        return;
+    }
+
+    ctx.clearRect(
+        0,
+        0,
+        overlay.width,
+        overlay.height
+    );
+
+    if (!trackerEnabled) {
+        requestAnimationFrame(renderTracker);
+        return;
+    }
+
+    const scene =
+        window?.stores?.phaser?.scene;
+
+    if (!scene?.characterManager) {
+        requestAnimationFrame(renderTracker);
+        return;
+    }
+
+    const camera =
+        scene.cameras?.cameras?.[0];
+
+    const chars =
+        scene.characterManager.characters;
+
+    if (!camera || !chars) {
+        requestAnimationFrame(renderTracker);
+        return;
+    }
+
+    let myCharacter = null;
+
+    for (const [id, char] of chars) {
+
+        if (char.isMain) {
+
+            myCharacter = char;
+            break;
+        }
+    }
+
+    if (!myCharacter) {
+        requestAnimationFrame(renderTracker);
+        return;
+    }
+
+    const camX = camera.midPoint.x;
+    const camY = camera.midPoint.y;
+
+    for (const [id, character] of chars) {
+
+        if (character === myCharacter)
+            continue;
+
+        const x =
+            character.body?.x;
+
+        const y =
+            character.body?.y;
+
+        if (
+            typeof x !== "number" ||
+            typeof y !== "number"
+        ) continue;
+
+        const screenPos =
+            camera.worldView;
+
+        const screenX =
+            x - screenPos.x;
+
+        const screenY =
+            y - screenPos.y;
+
+        // hide tracker if visible
+        if (
+            screenX >= 0 &&
+            screenX <= overlay.width &&
+            screenY >= 0 &&
+            screenY <= overlay.height
+        ) {
+            continue;
+        }
+
+        const angle =
+            Math.atan2(
+                y - camY,
+                x - camX
+            );
+
+        const distance =
+            Math.sqrt(
+                (x - camX) ** 2 +
+                (y - camY) ** 2
+            );
+
+        const meters =
+            Math.floor(distance / 64);
+
+        const drawDist =
+            Math.min(250, distance);
+
+        const px =
+            Math.cos(angle) *
+            drawDist +
+            overlay.width / 2;
+
+        const py =
+            Math.sin(angle) *
+            drawDist +
+            overlay.height / 2;
+
+        const teammate =
+            myCharacter.teamId ===
+            character.teamId;
+
+        const playerName =
+            character.nametag?.name ||
+            character.name ||
+            id;
+
+        ctx.strokeStyle =
+            teammate ? "#00ff66" : "white";
+
+        ctx.fillStyle =
+            teammate ? "#00ff66" : "white";
+
+        ctx.lineWidth = 4;
+
+        ctx.beginPath();
+
+        ctx.moveTo(px, py);
+
+        ctx.lineTo(
+            px + Math.cos(angle + 2.5) * 16,
+            py + Math.sin(angle + 2.5) * 16
+        );
+
+        ctx.lineTo(
+            px + Math.cos(angle - 2.5) * 16,
+            py + Math.sin(angle - 2.5) * 16
+        );
+
+        ctx.closePath();
+
+        ctx.fill();
+
+        ctx.font = "bold 18px Arial";
+        ctx.textAlign = "center";
+
+        const text =
+            playerName +
+            " (" +
+            meters +
+            "m)";
+
+        ctx.lineWidth = 6;
+
+        ctx.strokeStyle =
+            "rgba(0,0,0,0.8)";
+
+        ctx.strokeText(
+            text,
+            px,
+            py + 30
+        );
+
+        ctx.fillStyle = "white";
+
+        ctx.fillText(
+            text,
+            px,
+            py + 30
+        );
+    }
+
+    requestAnimationFrame(renderTracker);
+}
+
+// ======================
+// CLEANUP
+// ======================
+
+api.onStop(() => {
+
+    if (overlay) {
+        overlay.remove();
+    }
+});
+
+// ======================
+// START
+// ======================
+
+function startPlugin() {
+
+    if (!document.documentElement) {
+        setTimeout(startPlugin, 100);
+        return;
+    }
+
+    createCanvas();
+    renderTracker();
+
+    console.log(
+        "[GL] Loaded player tracker"
+    );
+}
+
+startPlugin();
